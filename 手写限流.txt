@@ -1,0 +1,91 @@
+@Component
+public class RateLimitFilter extends ZuulFilter {
+    /**
+     * 创建一个线程池，
+     */
+    private ExecutorService threadPool = Executors.newFixedThreadPool(1);
+
+
+    private ConcurrentHashMap<String, String> count = new ConcurrentHashMap<>();
+    private static Object lock = new Object();
+
+    {
+        /**
+         * 提交一个计数清除的线程
+         */
+        threadPool.submit(() -> {
+            while (true) {
+                Thread.sleep(1000);
+                System.out.println("子线程开始执行");
+                //如果集合是空的 就先等待
+                if (count.isEmpty()) {
+                    synchronized (lock) {
+                        System.out.println("我睡了");
+                        lock.wait();
+                    }
+                }
+                System.out.println("我起来了");
+                //用于存放过期需要被删除的key
+                Set<String> deleteKey = new HashSet<>();
+                count.forEach((k, v) -> {
+                    //获得过期的时间
+                    String time = v.split("-")[1];
+                    Long future = Long.valueOf(time);
+                    if (future < System.currentTimeMillis()) {
+                        deleteKey.add(k);
+                    }
+                });
+                deleteKey.forEach((k) -> count.remove(k));
+            }
+        });
+    }
+
+    @Override
+    public String filterType() {
+        return "pre";
+    }
+
+    @Override
+    public int filterOrder() {
+        return -1;
+    }
+
+    @Override
+    public boolean shouldFilter() {
+        return true;
+    }
+
+    @Override
+    public Object run() throws ZuulException {
+        RequestContext currentContext = RequestContext.getCurrentContext();
+        HttpServletRequest request = currentContext.getRequest();
+        String ip = request.getRemoteHost();
+        if (count.containsKey(ip)) {
+            //如果集合里面包含了，就开始统计5s内访问的次数 次数+时间
+            String numTime = count.get(ip);
+            String num = numTime.split("-")[0];
+            String time = numTime.split("-")[1];
+            //如果次数大约三次 就限制访问
+            int numInt = Integer.parseInt(num);
+            if (numInt >= 3) {
+                currentContext.setResponseBody("rateLimit");
+                currentContext.setResponseStatusCode(500);
+                currentContext.setSendZuulResponse(false);
+                return null;
+            }
+            numInt++;
+            //更新放到集合中
+            count.put(ip, numInt + "-" + time);
+        } else {
+            //如果集合中没有 就放进去一次 并且给定到期时间
+            count.put(ip, 1 + "-" + (System.currentTimeMillis() + 1000 * 10));
+            synchronized (lock) {
+                System.out.println("准备释放了");
+                lock.notifyAll();
+                System.out.println("释放了");
+            }
+        }
+        currentContext.setSendZuulResponse(true);
+        return null;
+    }
+}
